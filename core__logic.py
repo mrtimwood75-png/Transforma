@@ -1,8 +1,12 @@
+# core_logic.py
+
+import math
 import re
 import sys
 from io import BytesIO
 from pathlib import Path
 
+import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
@@ -507,6 +511,175 @@ def parse_new_format_order_bytes(file_bytes: bytes):
     return sections
 
 
+# ---------------- XLS FORMAT PARSER ----------------
+
+def get_uploaded_name(uploaded_file) -> str:
+    return getattr(uploaded_file, "name", "") or ""
+
+
+def get_uploaded_bytes(uploaded_file) -> bytes:
+    return uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+
+
+def is_blank(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return str(value).strip() == ""
+
+
+def cell_str(value) -> str:
+    if is_blank(value):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def parse_xls_qty(value) -> int:
+    if is_blank(value):
+        return 1
+    try:
+        return int(round(float(value)))
+    except Exception:
+        return 1
+
+
+def format_xls_volume(value) -> str:
+    if is_blank(value):
+        return ""
+    try:
+        num = float(value)
+        if num.is_integer():
+            return str(int(num))
+        return str(num).rstrip("0").rstrip(".")
+    except Exception:
+        return cell_str(value)
+
+
+def extract_xls_address(line: str):
+    line = clean_spaces(line)
+    line = re.sub(r"^Deliv:\s*", "", line, flags=re.I)
+
+    city = ""
+    postcode = ""
+
+    m = re.search(r"^(.*?)(?:,)?\s+([A-Za-z\s]+)\s+(SA|QLD|NSW|VIC|WA|TAS|NT|ACT)\s+(\d{4})$", line, re.I)
+    if m:
+        return (
+            clean_spaces(m.group(1)),
+            title_case_city(clean_spaces(m.group(2))),
+            m.group(4),
+        )
+
+    postcode = regex_find(line, r"\b(?:SA|QLD|NSW|VIC|WA|TAS|NT|ACT)\s+(\d{4})\b", re.I)
+    return line, "", postcode
+
+
+def parse_xls_order_bytes(file_bytes: bytes):
+    df = pd.read_excel(BytesIO(file_bytes), header=None, engine="xlrd")
+    df = df.where(pd.notna(df), None)
+
+    sections = []
+    header_data = None
+    current_items = []
+    pending_notes = []
+
+    for _, row in df.iterrows():
+        c0 = cell_str(row[0] if 0 in row.index else None)
+        c1 = cell_str(row[1] if 1 in row.index else None)
+        c2 = cell_str(row[2] if 2 in row.index else None)
+        c3 = cell_str(row[3] if 3 in row.index else None)
+        c4 = cell_str(row[4] if 4 in row.index else None)
+        c5 = row[5] if 5 in row.index else None
+        c9 = row[9] if 9 in row.index else None
+
+        if c0.isdigit() and len(c0) >= 4 and c4:
+            if header_data and current_items:
+                if pending_notes:
+                    header_data["notes"] = " | ".join(dict.fromkeys(pending_notes))
+                sections.append((header_data, current_items))
+
+            header_data = {
+                "sales_order_number": c0,
+                "customer_name": c4,
+                "ship_address": "",
+                "ship_zip": "",
+                "ship_city": "",
+                "phone": "",
+                "email": "",
+                "notes": "",
+            }
+            current_items = []
+            pending_notes = []
+            continue
+
+        if not header_data:
+            continue
+
+        if c0.lower().startswith("deliv:"):
+            ship_address, ship_city, ship_zip = extract_xls_address(c0)
+            header_data["ship_address"] = ship_address
+            header_data["ship_city"] = ship_city
+            header_data["ship_zip"] = ship_zip
+
+            if c1:
+                serials = re.sub(r"^S/No\(s\):\s*", "", c1, flags=re.I)
+                serials = clean_spaces(serials)
+                if serials:
+                    pending_notes.append(serials)
+            continue
+
+        if c0.lower().startswith("internal notes:"):
+            note = clean_spaces(f"{c0} {c1}")
+            if note:
+                pending_notes.append(note)
+            continue
+
+        if c0.lower().startswith("printed notes:"):
+            note = clean_spaces(c1)
+            if note:
+                pending_notes.append(note)
+            continue
+
+        if c0.lower().startswith("sub-total cubics:"):
+            continue
+
+        if c0.lower().startswith("record(s) printed"):
+            continue
+
+        if c0.lower().startswith("options software"):
+            continue
+
+        if c0.lower().startswith("bin:"):
+            sku = c3
+            description = c4
+            extra_desc = c2
+
+            full_description = clean_spaces(f"{extra_desc} {description}")
+
+            if not sku or not full_description:
+                continue
+
+            item = {
+                "sku": sku,
+                "qty": parse_xls_qty(c5),
+                "description": full_description,
+                "volume": format_xls_volume(c9),
+                "dimensions": extract_full_dimensions(full_description),
+            }
+            current_items.append(item)
+            continue
+
+    if header_data and current_items:
+        if pending_notes:
+            header_data["notes"] = " | ".join(dict.fromkeys(pending_notes))
+        sections.append((header_data, current_items))
+
+    return sections
+
+
 # ---------------- FORMAT DETECTION ----------------
 
 def detect_report_format(text: str) -> str:
@@ -553,6 +726,16 @@ def parse_order_bytes(file_bytes: bytes):
         return parse_new_format_order_bytes(file_bytes)
 
     raise ValueError("Unsupported report format.")
+
+
+def parse_uploaded_order_file(uploaded_file):
+    file_name = get_uploaded_name(uploaded_file).lower()
+    file_bytes = get_uploaded_bytes(uploaded_file)
+
+    if file_name.endswith(".xls"):
+        return parse_xls_order_bytes(file_bytes)
+
+    return parse_order_bytes(file_bytes)
 
 
 # ---------------- COMMON EXPORT LOGIC ----------------
@@ -699,7 +882,7 @@ def fill_workbook_from_rows(template_bytes: bytes, all_rows: list) -> bytes:
 def prepare_preview_rows(uploaded_files):
     all_rows = []
     for f in uploaded_files:
-        parsed_sections = parse_order_bytes(f.getvalue())
+        parsed_sections = parse_uploaded_order_file(f)
         for header_data, items in parsed_sections:
             all_rows.extend(build_row_values(header_data, item) for item in items)
     return all_rows
