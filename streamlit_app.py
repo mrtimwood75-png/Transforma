@@ -1,13 +1,7 @@
-# streamlit_app.py
-
-import sys
-import os
-sys.path.append(os.path.dirname(__file__))
-
 import streamlit as st
 from pathlib import Path
 
-from core_logic import (
+from app.core_logic import (
     prepare_preview_rows,
     convert_uploaded_files,
     default_template_path,
