@@ -1,3 +1,5 @@
+# streamlit_app.py
+
 import streamlit as st
 from pathlib import Path
 
@@ -7,6 +9,8 @@ from core_logic import (
     default_template_path,
     detect_report_format,
     parse_order_bytes,
+    parse_uploaded_order_file,
+    get_uploaded_name,
 )
 
 st.set_page_config(
@@ -15,7 +19,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# ---------- STYLE ----------
 st.markdown(
     """
     <style>
@@ -121,7 +124,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- SESSION STATE ----------
 if "rows" not in st.session_state:
     st.session_state.rows = []
 if "workbook_bytes" not in st.session_state:
@@ -129,7 +131,6 @@ if "workbook_bytes" not in st.session_state:
 if "output_name" not in st.session_state:
     st.session_state.output_name = "converted_sales_orders.xlsx"
 
-# ---------- HEADER ----------
 logo_candidates = [
     Path("files/BCLOGO.jpg"),
     Path("files/BCLOGO.png"),
@@ -154,35 +155,46 @@ with hero_right:
         """
         <div class="hero">
             <div class="hero-title">BoConcept Order Converter</div>
-            <div class="hero-sub">Convert ASCII reports into the delivery import workbook.</div>
+            <div class="hero-sub">Convert ASCII reports and XLS reports into the delivery import workbook.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-# ---------- NOTE ----------
 st.markdown(
     """
     <div class="note-box">
-        <strong>Accepted input:</strong> Input data must be either
-        <strong>"Packinglist - Order"</strong> Report (from Transport module) or
-        <strong>Sales Order Confirmation</strong> — both in ASCII format.
+        <strong>Accepted input:</strong> ASCII text reports in the existing supported formats, plus the supported
+        <strong>XLS delivery report</strong>.
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# ---------- MAIN LAYOUT ----------
 left, right = st.columns([2.3, 1], gap="large")
 
 with left:
-    st.markdown('<div class="section-title">Upload ASCII file(s)</div>', unsafe_allow_html=True)
-    uploaded_files = st.file_uploader(
+    st.markdown('<div class="section-title">Upload files</div>', unsafe_allow_html=True)
+
+    text_files = st.file_uploader(
         "Upload ASCII files",
         type=["txt"],
         accept_multiple_files=True,
-        label_visibility="collapsed",
+        key="text_reports",
     )
+
+    xls_files = st.file_uploader(
+        "Import XLS",
+        type=["xls"],
+        accept_multiple_files=True,
+        key="xls_reports",
+    )
+
+    uploaded_files = []
+    if text_files:
+        uploaded_files.extend(text_files)
+    if xls_files:
+        uploaded_files.extend(xls_files)
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
@@ -206,7 +218,7 @@ with right:
         <div class="side-card">
             <div class="section-title">Instructions</div>
             <div class="small-muted">
-                1. Upload ASCII file(s)<br><br>
+                1. Upload ASCII and/or XLS file(s)<br><br>
                 2. Click <strong>Load Preview</strong><br><br>
                 3. Review the parsed rows<br><br>
                 4. Click <strong>Create Workbook</strong><br><br>
@@ -217,17 +229,15 @@ with right:
         unsafe_allow_html=True,
     )
 
-# ---------- TEMPLATE ----------
 template_path = default_template_path()
 template_bytes = None
 if template_path:
     with open(template_path, "rb") as f:
         template_bytes = f.read()
 
-# ---------- LOAD PREVIEW ----------
 if load_preview:
     if not uploaded_files:
-        st.error("Upload at least one ASCII file.")
+        st.error("Upload at least one file.")
     else:
         try:
             total_orders = 0
@@ -235,11 +245,17 @@ if load_preview:
             formats = []
 
             for f in uploaded_files:
-                text = f.getvalue().decode(errors="ignore")
-                fmt = detect_report_format(text)
-                formats.append(fmt)
+                name = get_uploaded_name(f).lower()
 
-                parsed = parse_order_bytes(f.getvalue())
+                if name.endswith(".xls"):
+                    fmt = "xls"
+                    parsed = parse_uploaded_order_file(f)
+                else:
+                    text = f.getvalue().decode(errors="ignore")
+                    fmt = detect_report_format(text)
+                    parsed = parse_order_bytes(f.getvalue())
+
+                formats.append(fmt)
                 total_orders += len(parsed)
                 total_items += sum(len(items) for _, items in parsed)
 
@@ -252,12 +268,11 @@ if load_preview:
         except Exception as e:
             st.error(f"Error: {e}")
 
-# ---------- CREATE FILE ----------
 if create_file:
     if not template_bytes:
         st.error("Template not found in /files folder.")
-    elif not st.session_state.rows:
-        st.error("Load Preview first.")
+    elif not uploaded_files:
+        st.error("Upload at least one file.")
     else:
         try:
             file_bytes = convert_uploaded_files(
@@ -269,7 +284,6 @@ if create_file:
         except Exception as e:
             st.error(f"Export error: {e}")
 
-# ---------- DOWNLOAD ----------
 if st.session_state.workbook_bytes:
     st.download_button(
         "Download Excel Workbook",
@@ -280,7 +294,6 @@ if st.session_state.workbook_bytes:
 
 st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-# ---------- PREVIEW ----------
 st.markdown('<div class="preview-wrap">', unsafe_allow_html=True)
 st.subheader("Preview")
 
@@ -297,7 +310,6 @@ if st.session_state.rows:
 
     if len(st.session_state.rows) > 200:
         st.caption(f"Showing first 200 of {len(st.session_state.rows)} rows")
-
 else:
     st.write("No data loaded")
 
